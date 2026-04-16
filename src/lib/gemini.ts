@@ -61,6 +61,15 @@ Bạn phải chia làm 3 mốc thời gian chính cho mỗi ngành:
   + Hướng 2 (Quản lý/Điều hành): Trở thành Team Lead / Manager / Product Owner (Quản lý con người và quy trình).
 - Mức thu nhập dự kiến: Ghi rõ (VD: 40 - 80+ triệu VNĐ).
 
+[QUY ĐỊNH VỀ CẤU TRÚC HIỂN THỊ VÀ LƯƠNG - CỰC KỲ QUAN TRỌNG]
+1. Tên ngành (name): Phải là Tên Nhóm Ngành Chung (Ví dụ: Nhóm ngành Công nghệ thông tin, Nhóm ngành Y tế & Chăm sóc sức khỏe).
+2. Vị trí cụ thể (specificRoles): Liệt kê rõ các Vị trí nghề nghiệp cụ thể mà học sinh phù hợp trong nhóm ngành đó (Ví dụ: Lập trình viên Web, Bác sĩ Đa khoa). Phân biệt rõ lộ trình của các nghề trong cùng một nhóm.
+3. Mức lương (salaryRange): BẮT BUỘC hiển thị theo định dạng: "Mức lương thực tế: [Thấp nhất] - [Cao nhất] VNĐ/tháng".
+   - Mức thấp nhất: Là mức lương khởi điểm thực tế cho sinh viên mới ra trường tại thị trường Việt Nam hiện nay.
+   - Mức cao nhất: Là mức lương kỳ vọng sau 3-5 năm kinh nghiệm hoặc làm việc tại các môi trường cao cấp (tập đoàn lớn, bệnh viện tư nhân...).
+   - Ví dụ: "Mức lương thực tế: 8.000.000 - 35.000.000 VNĐ/tháng".
+4. Ngôn ngữ chuyên môn: Tránh dùng các từ ngữ quá bay bổng như "động lực làm giàu", hãy dùng các từ chuyên môn hướng nghiệp chuẩn xác hơn.
+
 [QUY ĐỊNH NGHIÊM NGẶT VỀ ĐỘ DÀI]
 Giao diện hiển thị có giới hạn không gian, do đó bạn BẮT BUỘC phải viết cực kỳ ngắn gọn và súc tích.
 - Đối với phần mô tả ngành nghề: Tuyệt đối không dài dòng. Giới hạn tối đa 1 đến 2 câu ngắn (dưới 25 từ).
@@ -112,11 +121,13 @@ Hãy phân tích và trả về kết quả định dạng JSON theo đúng sche
                 type: Type.OBJECT,
                 properties: {
                   name: { type: Type.STRING },
+                  specificRoles: { type: Type.ARRAY, items: { type: Type.STRING } },
                   matchPercentage: { type: Type.NUMBER },
                   description: { type: Type.STRING },
                   reason: { type: Type.STRING },
                   admissionSubjects: { type: Type.ARRAY, items: { type: Type.STRING } },
                   startingSalary: { type: Type.STRING },
+                  salaryRange: { type: Type.STRING },
                   demandForecast: { type: Type.STRING },
                   marketInsight: { type: Type.STRING },
                   jobWiki: {

@@ -29,11 +29,13 @@ export interface AssessmentData {
 export interface CareerResult {
   topCareers: {
     name: string;
+    specificRoles?: string[];
     matchPercentage: number;
     description: string;
     reason: string;
     admissionSubjects: string[];
     startingSalary: string;
+    salaryRange?: string;
     demandForecast: string;
     marketInsight: string;
     jobWiki: {
