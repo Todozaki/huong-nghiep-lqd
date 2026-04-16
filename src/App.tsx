@@ -910,7 +910,7 @@ const ClassManagement = ({ onClose, teacherId }: { onClose: () => void, teacherI
 const LoginModal = ({ isOpen, onClose, onLogin }: { isOpen: boolean, onClose: () => void, onLogin: (email: string, role: string) => void }) => {
   const [isLoading, setIsLoading] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
-  const [step, setStep] = useState<'role' | 'method' | 'email' | 'verification'>('role');
+  const [step, setStep] = useState<'role' | 'email' | 'verification'>('role');
   const [selectedRole, setSelectedRole] = useState<'student' | 'teacher' | null>(null);
   const [emailMode, setEmailMode] = useState<'login' | 'register'>('login');
   const [email, setEmail] = useState('');
@@ -921,6 +921,25 @@ const LoginModal = ({ isOpen, onClose, onLogin }: { isOpen: boolean, onClose: ()
   const [isVerifying, setIsVerifying] = useState(false);
 
   if (!isOpen) return null;
+
+  const handleResetPassword = async () => {
+    if (!email) {
+      setAuthError("Vui lòng nhập Email để đặt lại mật khẩu.");
+      return;
+    }
+    try {
+      await sendPasswordResetEmail(auth, email);
+      alert(`Link đặt lại mật khẩu đã được gửi đến ${email}. Vui lòng kiểm tra hộp thư.`);
+      setAuthError(null);
+    } catch (error: any) {
+      console.error("Reset Password Error:", error);
+      if (error.code === 'auth/user-not-found') {
+        setAuthError("Email này chưa được đăng ký.");
+      } else {
+        setAuthError(error.message || "Không thể gửi email đặt lại mật khẩu.");
+      }
+    }
+  };
 
   const handleEmailAuth = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -1149,7 +1168,7 @@ const LoginModal = ({ isOpen, onClose, onLogin }: { isOpen: boolean, onClose: ()
 
                 <div className="grid grid-cols-1 gap-4">
                   <button
-                    onClick={() => { setSelectedRole('student'); setStep('method'); }}
+                    onClick={() => { setSelectedRole('student'); setStep('email'); }}
                     className="group relative p-5 bg-white border-2 border-slate-100 rounded-3xl hover:border-indigo-600 hover:bg-indigo-50/50 transition-all text-left flex items-center gap-4 active:scale-[0.98]"
                   >
                     <div className="w-12 h-12 bg-indigo-100 text-indigo-600 rounded-xl flex items-center justify-center group-hover:scale-110 transition-transform">
@@ -1163,7 +1182,7 @@ const LoginModal = ({ isOpen, onClose, onLogin }: { isOpen: boolean, onClose: ()
                   </button>
 
                   <button
-                    onClick={() => { setSelectedRole('teacher'); setStep('method'); }}
+                    onClick={() => { setSelectedRole('teacher'); setStep('email'); }}
                     className="group relative p-5 bg-white border-2 border-slate-100 rounded-3xl hover:border-violet-600 hover:bg-violet-50/50 transition-all text-left flex items-center gap-4 active:scale-[0.98]"
                   >
                     <div className="w-12 h-12 bg-violet-100 text-violet-600 rounded-xl flex items-center justify-center group-hover:scale-110 transition-transform">
@@ -1286,8 +1305,19 @@ const LoginModal = ({ isOpen, onClose, onLogin }: { isOpen: boolean, onClose: ()
                   </div>
 
                   <div className="space-y-1.5">
-                    <label className="text-xs font-bold text-slate-500 uppercase ml-1">Mật khẩu</label>
-                    <div className="relative">
+                      <div className="flex justify-between items-center mb-1.5 ml-1">
+                        <label className="text-xs font-bold text-slate-500 uppercase">Mật khẩu</label>
+                        {emailMode === 'login' && (
+                          <button
+                            type="button"
+                            onClick={handleResetPassword}
+                            className="text-xs text-indigo-600 font-bold hover:underline"
+                          >
+                            Bạn quên mật khẩu?
+                          </button>
+                        )}
+                      </div>
+                      <div className="relative">
                       <Lock className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-400" />
                       <input 
                         type={showPassword ? "text" : "password"}
