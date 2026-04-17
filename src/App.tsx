@@ -950,6 +950,13 @@ const LoginModal = ({ isOpen, onClose, onLogin }: { isOpen: boolean, onClose: ()
     }
     setIsLoading(true);
     setAuthError(null);
+
+    // Validate password length for registration
+    if (password.length < 6) {
+      setAuthError("Mật khẩu phải chứa tối thiểu 6 ký tự!");
+      setIsLoading(false);
+      return;
+    }
     
     try {
       if (emailMode === 'register') {
@@ -1286,6 +1293,11 @@ const LoginModal = ({ isOpen, onClose, onLogin }: { isOpen: boolean, onClose: ()
                         {showPassword ? <EyeOff className="w-5 h-5" /> : <Eye className="w-5 h-5" />}
                       </button>
                     </div>
+                    {emailMode === 'register' && (
+                      <p className="text-[10px] text-slate-500 mt-1.5 ml-1 italic">
+                        *Vui lòng đặt mật khẩu chứa tối thiểu 6 ký tự (chữ cái hoặc chữ số)*
+                      </p>
+                    )}
                   </div>
 
                   {authError && (
