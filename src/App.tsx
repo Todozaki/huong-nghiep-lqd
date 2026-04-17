@@ -62,7 +62,7 @@ import {
   runTransaction,
   sendPasswordResetEmail
 } from './lib/firebase';
-import { doc, setDoc, getDoc, serverTimestamp, collection, onSnapshot, getDocFromServer, deleteDoc, updateDoc, query, where, getDocs, addDoc } from 'firebase/firestore';
+import { doc, setDoc, getDoc, serverTimestamp, collection, onSnapshot, getDocFromServer, deleteDoc, updateDoc, query, where, getDocs, addDoc, orderBy, or } from 'firebase/firestore';
 import { db } from './lib/firebase';
 import { updatePassword, updateEmail } from 'firebase/auth';
 import { analyzeCareer, createCounselorChat } from './lib/gemini';
@@ -587,46 +587,172 @@ const ProfileModal = ({
   );
 };
 
-const ClassManagement = ({ onClose, teacherId }: { onClose: () => void, teacherId: string }) => {
+const ClassManagement = ({ onClose, teacherId, initialClassId }: { onClose: () => void, teacherId: string, initialClassId?: string | null }) => {
   const [classes, setClasses] = useState<any[]>([]);
   const [newClassName, setNewClassName] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [selectedClass, setSelectedClass] = useState<any | null>(null);
   const [studentIdToAdd, setStudentIdToAdd] = useState('');
   const [studentsInClass, setStudentsInClass] = useState<any[]>([]);
+  const [pendingStudentsInClass, setPendingStudentsInClass] = useState<any[]>([]);
+  const [coTeachersInClass, setCoTeachersInClass] = useState<any[]>([]);
   const [isAddingStudent, setIsAddingStudent] = useState(false);
+  const [viewingStudentResult, setViewingStudentResult] = useState<any | null>(null);
+  const [feedbacks, setFeedbacks] = useState<any[]>([]);
+  const [newFeedback, setNewFeedback] = useState("");
+  const [isSendingFeedback, setIsSendingFeedback] = useState(false);
+  const [activeTab, setActiveTab] = useState<'profile' | 'careers' | 'roadmap'>('profile');
+  const [localCareerIndex, setLocalCareerIndex] = useState(0);
+  const [studentToKick, setStudentToKick] = useState<string | null>(null);
 
   useEffect(() => {
-    const q = query(collection(db, 'classes'), where('teacherId', '==', teacherId));
+    if (viewingStudentResult) {
+      setActiveTab('profile');
+      setLocalCareerIndex(0);
+    }
+  }, [viewingStudentResult]);
+
+  useEffect(() => {
+    if (viewingStudentResult) {
+      const q = query(
+        collection(db, 'users', viewingStudentResult.id, 'feedbacks'),
+        orderBy('timestamp', 'asc')
+      );
+      const unsubscribe = onSnapshot(q, (snapshot) => {
+        const list = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+        setFeedbacks(list);
+      }, (error) => {
+        handleFirestoreError(error, OperationType.LIST, `users/${viewingStudentResult.id}/feedbacks`);
+      });
+      return () => unsubscribe();
+    } else {
+      setFeedbacks([]);
+    }
+  }, [viewingStudentResult]);
+
+  const handleSendFeedback = async () => {
+    if (!newFeedback.trim() || !viewingStudentResult || !auth.currentUser) return;
+    setIsSendingFeedback(true);
+    try {
+      const feedbacksRef = collection(db, 'users', viewingStudentResult.id, 'feedbacks');
+      await addDoc(feedbacksRef, {
+        senderId: auth.currentUser.uid,
+        senderName: auth.currentUser.displayName || 'Giáo viên',
+        text: newFeedback,
+        timestamp: serverTimestamp(),
+        isTeacher: true
+      });
+      setNewFeedback("");
+    } catch (error) {
+      handleFirestoreError(error, OperationType.WRITE, `users/${viewingStudentResult.id}/feedbacks`);
+    } finally {
+      setIsSendingFeedback(false);
+    }
+  };
+
+  useEffect(() => {
+    const q = query(
+      collection(db, 'classes'), 
+      or(where('teacherId', '==', teacherId), where('coTeacherIds', 'array-contains', teacherId))
+    );
     const unsubscribe = onSnapshot(q, (snapshot) => {
       const classesList = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
       setClasses(classesList);
+      
+      // Select class if initialClassId is provided
+      if (initialClassId) {
+        const found = classesList.find(c => c.id === initialClassId);
+        if (found) setSelectedClass(found);
+      }
     }, (error) => {
       handleFirestoreError(error, OperationType.LIST, 'classes');
     });
     return () => unsubscribe();
-  }, [teacherId]);
+  }, [teacherId, initialClassId]);
 
   useEffect(() => {
-    if (selectedClass && selectedClass.studentIds && selectedClass.studentIds.length > 0) {
-      const fetchStudents = async () => {
-        const studentsList: any[] = [];
-        for (const uid of selectedClass.studentIds) {
-          try {
-            const userDoc = await getDoc(doc(db, 'users', uid));
-            if (userDoc.exists()) {
-              studentsList.push({ id: userDoc.id, ...userDoc.data() });
+    const fetchStudentsRecursive = async () => {
+      if (selectedClass) {
+        // Fetch co-teachers
+        if (selectedClass.coTeacherIds && selectedClass.coTeacherIds.length > 0) {
+          const uniqueCoUids = Array.from(new Set(selectedClass.coTeacherIds as string[]));
+          const coTeachersList: any[] = [];
+          for (const uid of uniqueCoUids) {
+            try {
+              const userDoc = await getDoc(doc(db, 'users', uid));
+              if (userDoc.exists()) {
+                coTeachersList.push({ id: userDoc.id, ...userDoc.data() });
+              }
+            } catch (error) {
+              handleFirestoreError(error, OperationType.GET, `users/${uid}`);
             }
-          } catch (error) {
-            handleFirestoreError(error, OperationType.GET, `users/${uid}`);
           }
+          setCoTeachersInClass(coTeachersList);
+        } else {
+          setCoTeachersInClass([]);
         }
-        setStudentsInClass(studentsList);
-      };
-      fetchStudents();
-    } else {
-      setStudentsInClass([]);
-    }
+
+        // Fetch pending co-teachers
+        if (selectedClass.pendingTeacherIds && selectedClass.pendingTeacherIds.length > 0) {
+          const uniquePendingCoUids = Array.from(new Set(selectedClass.pendingTeacherIds as string[]));
+          const pendingCoList: any[] = [];
+          for (const uid of uniquePendingCoUids) {
+            try {
+              const userDoc = await getDoc(doc(db, 'users', uid));
+              if (userDoc.exists()) {
+                pendingCoList.push({ id: userDoc.id, ...userDoc.data(), isCoTeacher: true });
+              }
+            } catch (error) {
+              handleFirestoreError(error, OperationType.GET, `users/${uid}`);
+            }
+          }
+          setPendingStudentsInClass(prev => [...prev, ...pendingCoList]);
+        }
+        
+        // Fetch joined students
+        if (selectedClass.studentIds && selectedClass.studentIds.length > 0) {
+          const uniqueUids = Array.from(new Set(selectedClass.studentIds as string[]));
+          const studentsList: any[] = [];
+          for (const uid of uniqueUids) {
+            try {
+              const userDoc = await getDoc(doc(db, 'users', uid));
+              if (userDoc.exists()) {
+                studentsList.push({ id: userDoc.id, ...userDoc.data() });
+              }
+            } catch (error) {
+              handleFirestoreError(error, OperationType.GET, `users/${uid}`);
+            }
+          }
+          setStudentsInClass(studentsList);
+        } else {
+          setStudentsInClass([]);
+        }
+
+        // Fetch pending students
+        if (selectedClass.pendingStudentIds && selectedClass.pendingStudentIds.length > 0) {
+          const uniquePendingUids = Array.from(new Set(selectedClass.pendingStudentIds as string[]));
+          const pendingList: any[] = [];
+          for (const uid of uniquePendingUids) {
+            try {
+              const userDoc = await getDoc(doc(db, 'users', uid));
+              if (userDoc.exists()) {
+                pendingList.push({ id: userDoc.id, ...userDoc.data() });
+              }
+            } catch (error) {
+              handleFirestoreError(error, OperationType.GET, `users/${uid}`);
+            }
+          }
+          setPendingStudentsInClass(pendingList);
+        } else {
+          setPendingStudentsInClass([]);
+        }
+      } else {
+        setStudentsInClass([]);
+        setPendingStudentsInClass([]);
+        setCoTeachersInClass([]);
+      }
+    };
+    fetchStudentsRecursive();
   }, [selectedClass]);
 
   const handleCreateClass = async (e: React.FormEvent) => {
@@ -638,6 +764,9 @@ const ClassManagement = ({ onClose, teacherId }: { onClose: () => void, teacherI
         name: newClassName,
         teacherId: teacherId,
         studentIds: [],
+        pendingStudentIds: [],
+        coTeacherIds: [],
+        pendingTeacherIds: [],
         createdAt: serverTimestamp()
       });
       setNewClassName('');
@@ -649,50 +778,170 @@ const ClassManagement = ({ onClose, teacherId }: { onClose: () => void, teacherI
     }
   };
 
+  const handleKickStudent = async (studentUid: string) => {
+    if (!selectedClass) return;
+    
+    setIsLoading(true);
+    try {
+      const classRef = doc(db, 'classes', selectedClass.id);
+      const updatedStudentIds = Array.from(new Set(selectedClass.studentIds.filter((id: string) => id !== studentUid)));
+      
+      await updateDoc(classRef, {
+        studentIds: updatedStudentIds
+      });
+      
+      setSelectedClass((prev: any) => ({
+        ...prev,
+        studentIds: updatedStudentIds
+      }));
+      
+      setStudentToKick(null);
+      // alert("Đã mời học sinh ra khỏi lớp.");
+    } catch (error) {
+      handleFirestoreError(error, OperationType.UPDATE, `classes/${selectedClass.id}`);
+      alert("Lỗi khi mời học sinh ra khỏi lớp.");
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleCancelInvite = async (studentUid: string) => {
+    if (!selectedClass) return;
+    
+    try {
+      const classRef = doc(db, 'classes', selectedClass.id);
+      const updatedPendingIds = Array.from(new Set((selectedClass.pendingStudentIds || []).filter((id: string) => id !== studentUid)));
+      
+      await updateDoc(classRef, {
+        pendingStudentIds: updatedPendingIds
+      });
+      
+      setSelectedClass((prev: any) => ({
+        ...prev,
+        pendingStudentIds: updatedPendingIds
+      }));
+      
+      alert("Đã hủy lời mời.");
+    } catch (error) {
+      handleFirestoreError(error, OperationType.UPDATE, `classes/${selectedClass.id}`);
+      alert("Lỗi khi hủy lời mời.");
+    }
+  };
+
+  const handleCancelTeacherInvite = async (teacherUid: string) => {
+    if (!selectedClass) return;
+    
+    try {
+      const classRef = doc(db, 'classes', selectedClass.id);
+      const updatedPendingIds = Array.from(new Set((selectedClass.pendingTeacherIds || []).filter((id: string) => id !== teacherUid)));
+      
+      await updateDoc(classRef, {
+        pendingTeacherIds: updatedPendingIds
+      });
+      
+      setSelectedClass((prev: any) => ({
+        ...prev,
+        pendingTeacherIds: updatedPendingIds
+      }));
+      
+      alert("Đã hủy lời mời đồng nghiệp.");
+    } catch (error) {
+      handleFirestoreError(error, OperationType.UPDATE, `classes/${selectedClass.id}`);
+      alert("Lỗi khi hủy lời mời.");
+    }
+  };
+
+  const handleRemoveCoTeacher = async (teacherUid: string) => {
+    if (!selectedClass) return;
+    if (teacherUid === teacherId) {
+      alert("Bạn không thể tự xóa mình khỏi lớp.");
+      return;
+    }
+    
+    try {
+      const classRef = doc(db, 'classes', selectedClass.id);
+      const updatedCoTeacherIds = (selectedClass.coTeacherIds || []).filter((id: string) => id !== teacherUid);
+      
+      await updateDoc(classRef, {
+        coTeacherIds: updatedCoTeacherIds
+      });
+      
+      setSelectedClass((prev: any) => ({
+        ...prev,
+        coTeacherIds: updatedCoTeacherIds
+      }));
+      
+      alert("Đã xóa đồng nghiệp khỏi lớp.");
+    } catch (error) {
+      handleFirestoreError(error, OperationType.UPDATE, `classes/${selectedClass.id}`);
+      alert("Lỗi khi xóa đồng nghiệp.");
+    }
+  };
+
   const handleAddStudent = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!studentIdToAdd.trim() || !selectedClass) return;
     setIsAddingStudent(true);
     try {
-      // Find student by userCode
+      // Find user by userCode
       const q = query(collection(db, 'users'), where('userCode', '==', studentIdToAdd.trim()));
       const querySnapshot = await getDocs(q);
       
       if (querySnapshot.empty) {
-        alert("Không tìm thấy học sinh với mã số này.");
+        alert("Không tìm thấy người dùng với mã số này.");
         return;
       }
 
-      const studentDoc = querySnapshot.docs[0];
-      const studentUid = studentDoc.id;
+      const userDoc = querySnapshot.docs[0];
+      const userData = userDoc.data();
+      const userUid = userDoc.id;
 
-      if (selectedClass.studentIds.includes(studentUid)) {
-        alert("Học sinh này đã có trong lớp.");
+      const currentPendingIds = selectedClass.pendingStudentIds || [];
+      const currentStudentIds = selectedClass.studentIds || [];
+      const currentCoTeacherIds = selectedClass.coTeacherIds || [];
+
+      if (currentStudentIds.includes(userUid) || currentPendingIds.includes(userUid) || currentCoTeacherIds.includes(userUid) || selectedClass.teacherId === userUid) {
+        alert("Người dùng này đã có trong lớp hoặc đã được mời.");
         return;
       }
 
       const classRef = doc(db, 'classes', selectedClass.id);
-      await updateDoc(classRef, {
-        studentIds: [...selectedClass.studentIds, studentUid]
-      });
       
-      // Update local selected class to trigger student fetch
-      setSelectedClass((prev: any) => ({
-        ...prev,
-        studentIds: [...prev.studentIds, studentUid]
-      }));
+      if (userData.role === 'teacher') {
+        const currentPendingTeacherIds = selectedClass.pendingTeacherIds || [];
+        if (currentPendingTeacherIds.includes(userUid)) {
+          alert("Giáo viên này đã được mời.");
+          return;
+        }
+        const newPendingTeacherIds = Array.from(new Set([...currentPendingTeacherIds, userUid]));
+        await updateDoc(classRef, {
+          pendingTeacherIds: newPendingTeacherIds
+        });
+        setSelectedClass((prev: any) => ({
+          ...prev,
+          pendingTeacherIds: newPendingTeacherIds
+        }));
+        alert("Đã gửi lời mời cho đồng nghiệp.");
+      } else {
+        const newPendingIds = Array.from(new Set([...currentPendingIds, userUid]));
+        await updateDoc(classRef, {
+          pendingStudentIds: newPendingIds
+        });
+        setSelectedClass((prev: any) => ({
+          ...prev,
+          pendingStudentIds: newPendingIds
+        }));
+        alert("Đã gửi lời mời cho học sinh.");
+      }
       
       setStudentIdToAdd('');
-      alert("Đã thêm học sinh vào lớp.");
     } catch (error) {
       handleFirestoreError(error, OperationType.UPDATE, `classes/${selectedClass.id}`);
-      alert("Lỗi khi thêm học sinh.");
+      alert("Lỗi khi thêm người dùng.");
     } finally {
       setIsAddingStudent(false);
     }
   };
-
-  const [viewingStudentResult, setViewingStudentResult] = useState<any | null>(null);
 
   return (
     <div className="fixed inset-0 z-[120] bg-slate-50 overflow-y-auto">
@@ -751,7 +1000,10 @@ const ClassManagement = ({ onClose, teacherId }: { onClose: () => void, teacherI
                       )}
                     >
                       {c.name}
-                      <span className="block text-[10px] opacity-70 font-medium">{c.studentIds?.length || 0} học sinh</span>
+                      <span className="block text-[10px] opacity-70 font-medium">
+                        {c.studentIds?.length || 0} học sinh
+                        {c.pendingStudentIds?.length > 0 && ` (${c.pendingStudentIds.length} chờ)`}
+                      </span>
                     </button>
                   ))
                 )}
@@ -760,7 +1012,42 @@ const ClassManagement = ({ onClose, teacherId }: { onClose: () => void, teacherI
           </div>
 
           {/* Class Details */}
-          <div className="lg:col-span-2">
+          <div className="lg:col-span-2 relative">
+            <AnimatePresence>
+              {studentToKick && (
+                <motion.div 
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  exit={{ opacity: 0 }}
+                  className="absolute inset-x-0 bottom-0 z-50 p-6 bg-slate-900/95 backdrop-blur-md rounded-[2.5rem] border border-slate-700 shadow-2xl m-4"
+                >
+                  <div className="flex flex-col items-center text-center">
+                    <div className="w-12 h-12 bg-rose-500/20 text-rose-500 rounded-full flex items-center justify-center mb-3">
+                      <ShieldAlert className="w-6 h-6" />
+                    </div>
+                    <h4 className="text-white font-bold mb-1">Xác nhận mời ra khỏi lớp?</h4>
+                    <p className="text-slate-400 text-xs mb-4">Học sinh này sẽ không còn trong danh sách lớp của bạn.</p>
+                    <div className="flex gap-2 w-full">
+                      <button 
+                        onClick={() => handleKickStudent(studentToKick)}
+                        disabled={isLoading}
+                        className="flex-1 py-2 bg-rose-600 text-white rounded-xl text-xs font-bold hover:bg-rose-700 transition-all disabled:opacity-50"
+                      >
+                        {isLoading ? 'Đang thực hiện...' : 'Mời ra khỏi lớp'}
+                      </button>
+                      <button 
+                        onClick={() => setStudentToKick(null)}
+                        disabled={isLoading}
+                        className="flex-1 py-2 bg-slate-700 text-white rounded-xl text-xs font-bold hover:bg-slate-600 transition-all"
+                      >
+                        Hủy
+                      </button>
+                    </div>
+                  </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
+
             {selectedClass ? (
               <div className="bg-white p-8 rounded-[2.5rem] shadow-xl border border-slate-100 min-h-[500px]">
                 <div className="flex items-center justify-between mb-8">
@@ -768,10 +1055,10 @@ const ClassManagement = ({ onClose, teacherId }: { onClose: () => void, teacherI
                   <form onSubmit={handleAddStudent} className="flex gap-2">
                     <input 
                       type="text" 
-                      placeholder="Mã số HS (VD: HS-000001)" 
+                      placeholder="Mã số HS/GV (VD: HS-000001)" 
                       value={studentIdToAdd}
                       onChange={(e) => setStudentIdToAdd(e.target.value)}
-                      className="px-4 py-2 bg-slate-50 border border-slate-200 rounded-xl outline-none focus:ring-2 focus:ring-indigo-100 transition-all text-sm"
+                      className="px-4 py-2 bg-slate-50 border border-slate-200 rounded-xl outline-none focus:ring-2 focus:ring-indigo-100 transition-all text-sm w-48"
                     />
                     <button 
                       type="submit"
@@ -785,16 +1072,50 @@ const ClassManagement = ({ onClose, teacherId }: { onClose: () => void, teacherI
                 </div>
 
                 <div className="space-y-4">
+                  {coTeachersInClass.length > 0 && (
+                    <>
+                      <h3 className="text-sm font-black text-slate-400 uppercase tracking-widest">Đồng nghiệp</h3>
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        {coTeachersInClass.map((ct) => (
+                          <div key={`coteacher-${ct.id}`} className="p-4 bg-indigo-50/50 rounded-2xl border border-indigo-100 flex items-center justify-between group">
+                            <div className="flex items-center gap-3">
+                              <img 
+                                src={ct.photoURL || `https://api.dicebear.com/7.x/avataaars/svg?seed=${ct.email}`} 
+                                alt="Avatar" 
+                                className="w-10 h-10 rounded-xl object-cover"
+                                referrerPolicy="no-referrer"
+                              />
+                              <div>
+                                <p className="font-bold text-slate-900">{ct.displayName || 'Giáo viên'}</p>
+                                <p className="text-[10px] font-mono font-bold text-indigo-600">{ct.userCode}</p>
+                              </div>
+                            </div>
+                            {selectedClass.teacherId === teacherId && (
+                              <button 
+                                onClick={() => handleRemoveCoTeacher(ct.id)}
+                                className="p-2 text-slate-400 hover:text-rose-600 hover:bg-white rounded-lg transition-all"
+                                title="Xóa đồng nghiệp"
+                              >
+                                <Trash2 className="w-5 h-5" />
+                              </button>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    </>
+                  )}
+
                   <h3 className="text-sm font-black text-slate-400 uppercase tracking-widest">Danh sách học sinh</h3>
-                  {studentsInClass.length === 0 ? (
+                  {(studentsInClass.length === 0 && pendingStudentsInClass.length === 0) ? (
                     <div className="flex flex-col items-center justify-center py-12 text-slate-400">
                       <Users className="w-12 h-12 mb-2 opacity-20" />
                       <p>Chưa có học sinh nào trong lớp này.</p>
                     </div>
                   ) : (
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      {/* Joined Students */}
                       {studentsInClass.map((s) => (
-                        <div key={s.id} className="p-4 bg-slate-50 rounded-2xl border border-slate-100 flex items-center justify-between">
+                        <div key={`joined-${s.id}`} className="p-4 bg-white rounded-2xl border border-slate-100 flex items-center justify-between group">
                           <div className="flex items-center gap-3">
                             <img 
                               src={s.photoURL || `https://api.dicebear.com/7.x/avataaars/svg?seed=${s.email}`} 
@@ -807,12 +1128,49 @@ const ClassManagement = ({ onClose, teacherId }: { onClose: () => void, teacherI
                               <p className="text-[10px] font-mono font-bold text-indigo-600">{s.userCode}</p>
                             </div>
                           </div>
+                          <div className="flex items-center gap-2">
+                            <button 
+                              onClick={() => setViewingStudentResult(s)}
+                              className="p-2 text-indigo-600 hover:bg-indigo-50 rounded-lg transition-all"
+                              title="Xem đánh giá"
+                            >
+                              <BarChart3 className="w-5 h-5" />
+                            </button>
+                            <button 
+                              onClick={() => setStudentToKick(s.id)}
+                              className="p-2 text-rose-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition-all md:opacity-0 md:group-hover:opacity-100"
+                              title="Mời ra khỏi lớp"
+                            >
+                              <Ban className="w-5 h-5" />
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+
+                      {/* Pending Students */}
+                      {pendingStudentsInClass.map((s) => (
+                        <div key={`pending-${s.id}`} className="p-4 bg-slate-50/50 rounded-2xl border border-dashed border-slate-200 flex items-center justify-between group">
+                          <div className="flex items-center gap-3 opacity-60">
+                            <img 
+                              src={s.photoURL || `https://api.dicebear.com/7.x/avataaars/svg?seed=${s.email}`} 
+                              alt="Avatar" 
+                              className="w-10 h-10 rounded-xl object-cover grayscale"
+                              referrerPolicy="no-referrer"
+                            />
+                            <div>
+                              <p className="font-bold text-slate-700">{s.displayName || 'Chưa đặt tên'}</p>
+                              <div className="flex items-center gap-2">
+                                <span className="text-[9px] font-black text-amber-600 bg-amber-100 px-1.5 py-0.5 rounded uppercase">Đang chờ</span>
+                                <p className="text-[10px] font-mono font-bold text-slate-400">{s.userCode}</p>
+                              </div>
+                            </div>
+                          </div>
                           <button 
-                            onClick={() => setViewingStudentResult(s)}
-                            className="p-2 text-indigo-600 hover:bg-indigo-100 rounded-lg transition-all"
-                            title="Xem đánh giá"
+                            onClick={() => handleCancelInvite(s.id)}
+                            className="p-2 text-slate-400 hover:text-rose-500 hover:bg-white rounded-lg transition-all"
+                            title="Hủy lời mời"
                           >
-                            <BarChart3 className="w-5 h-5" />
+                            <Trash2 className="w-5 h-5" />
                           </button>
                         </div>
                       ))}
@@ -845,7 +1203,7 @@ const ClassManagement = ({ onClose, teacherId }: { onClose: () => void, teacherI
               initial={{ opacity: 0, scale: 0.95, y: 20 }}
               animate={{ opacity: 1, scale: 1, y: 0 }}
               exit={{ opacity: 0, scale: 0.95, y: 20 }}
-              className="relative w-full max-w-2xl bg-white rounded-[2.5rem] shadow-2xl overflow-hidden max-h-[90vh] flex flex-col"
+              className="relative w-full max-w-4xl bg-white rounded-[2.5rem] shadow-2xl overflow-hidden max-h-[90vh] flex flex-col"
             >
               <div className="p-6 border-b border-slate-100 flex items-center justify-between bg-slate-50/50">
                 <div className="flex items-center gap-3">
@@ -853,7 +1211,7 @@ const ClassManagement = ({ onClose, teacherId }: { onClose: () => void, teacherI
                     <UserCheck className="w-6 h-6" />
                   </div>
                   <div>
-                    <h2 className="text-xl font-black text-slate-900">Đánh giá của {viewingStudentResult.displayName}</h2>
+                    <h2 className="text-xl font-black text-slate-900">Báo cáo chi tiết: {viewingStudentResult.displayName}</h2>
                     <p className="text-xs font-bold text-slate-500">{viewingStudentResult.userCode}</p>
                   </div>
                 </div>
@@ -862,43 +1220,287 @@ const ClassManagement = ({ onClose, teacherId }: { onClose: () => void, teacherI
                 </button>
               </div>
               
-              <div className="p-8 overflow-y-auto">
-                {viewingStudentResult.lastResult ? (
+              <div className="flex-1 overflow-y-auto custom-scrollbar">
+                <div className="p-8 grid grid-cols-1 lg:grid-cols-2 gap-8">
+                  {/* Left Column: Report Details */}
                   <div className="space-y-6">
-                    <div className="grid grid-cols-2 gap-4">
-                      <div className="p-4 bg-indigo-50 rounded-2xl border border-indigo-100">
-                        <p className="text-[10px] font-black text-indigo-400 uppercase tracking-widest mb-1">Nghề nghiệp gợi ý</p>
-                        <p className="text-lg font-black text-indigo-900">{viewingStudentResult.lastResult.careerName}</p>
+                    {viewingStudentResult.lastResult ? (
+                      <div className="space-y-6">
+                        {/* Tabs Navigation */}
+                        <div className="flex gap-4 border-b border-slate-100 pb-2 overflow-x-auto no-scrollbar">
+                          {[
+                            { id: 'profile', label: 'Hồ sơ năng lực', icon: User },
+                            { id: 'careers', label: 'Gợi ý nghề nghiệp', icon: Briefcase },
+                            { id: 'roadmap', label: 'Lộ trình phát triển', icon: Target },
+                          ].map((tab) => (
+                            <button
+                              key={tab.id}
+                              onClick={() => setActiveTab(tab.id as any)}
+                              className={cn(
+                                "flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold transition-all whitespace-nowrap",
+                                activeTab === tab.id 
+                                  ? "bg-indigo-600 text-white shadow-lg shadow-indigo-100" 
+                                  : "text-slate-500 hover:bg-slate-100"
+                              )}
+                            >
+                              <tab.icon className="w-3.5 h-3.5" />
+                              {tab.label}
+                            </button>
+                          ))}
+                        </div>
+
+                        {/* Profile Tab */}
+                        {activeTab === 'profile' && (
+                          <motion.div 
+                            initial={{ opacity: 0, y: 10 }}
+                            animate={{ opacity: 1, y: 0 }}
+                            className="space-y-6"
+                          >
+                            <div className="grid grid-cols-2 gap-4">
+                              <div className="p-5 bg-amber-50 rounded-2xl border border-amber-100">
+                                <h5 className="text-[10px] font-black text-amber-500 uppercase tracking-widest mb-2">Nhóm tính cách (MBTI)</h5>
+                                <p className="text-xl font-black text-amber-900">{viewingStudentResult.lastResult.mbti || 'N/A'}</p>
+                              </div>
+                              <div className="p-5 bg-rose-50 rounded-2xl border border-rose-100">
+                                <h5 className="text-[10px] font-black text-rose-500 uppercase tracking-widest mb-2">Mã Holland</h5>
+                                <p className="text-xl font-black text-rose-900">{viewingStudentResult.lastResult.holland || 'N/A'}</p>
+                              </div>
+                            </div>
+
+                            <div className="p-5 bg-blue-50 rounded-2xl border border-blue-100">
+                              <h5 className="text-[10px] font-black text-blue-500 uppercase tracking-widest mb-2 flex items-center justify-between">
+                                Kết quả học tập (GPA)
+                                <span className="text-blue-600 font-black">{viewingStudentResult.lastResult.gpa || '0.0'}</span>
+                              </h5>
+                              <div className="grid grid-cols-3 gap-2 mt-3">
+                                {viewingStudentResult.lastResult.subjects && Object.entries(viewingStudentResult.lastResult.subjects).map(([sub, val]: any) => (
+                                  <div key={sub} className="bg-white/60 p-2 rounded-lg text-center border border-blue-100">
+                                    <p className="text-[9px] text-slate-500 font-bold uppercase">{sub}</p>
+                                    <p className="text-sm font-black text-blue-700">{val}</p>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+
+                            <div className="space-y-3">
+                              <h4 className="font-bold text-slate-800 text-sm flex items-center gap-2">
+                                <Heart className="w-4 h-4 text-rose-500" /> Sở thích & Đam mê:
+                              </h4>
+                              <div className="flex flex-wrap gap-2">
+                                {(viewingStudentResult.lastResult.interests || viewingStudentResult.lastResult.assessmentData?.interests)?.map((interest: string, idx: number) => (
+                                  <span key={idx} className="px-3 py-1 bg-indigo-50 text-indigo-600 rounded-full text-[10px] font-bold border border-indigo-100">
+                                    {interest}
+                                  </span>
+                                ))}
+                              </div>
+                            </div>
+
+                            <div className="p-6 bg-slate-50 rounded-[2rem] border border-slate-100">
+                              <h4 className="flex items-center gap-2 font-bold text-slate-800 mb-3 text-sm uppercase tracking-wider">
+                                <BrainCircuit className="w-4 h-4 text-indigo-600" /> Tóm tắt phân tích
+                              </h4>
+                              <p className="text-sm text-slate-600 leading-relaxed italic">
+                                "{viewingStudentResult.lastResult.summary || viewingStudentResult.lastResult.overallSummary}"
+                              </p>
+                            </div>
+                          </motion.div>
+                        )}
+
+                        {/* Careers Tab */}
+                        {activeTab === 'careers' && (
+                          <motion.div 
+                            initial={{ opacity: 0, y: 10 }}
+                            animate={{ opacity: 1, y: 0 }}
+                            className="space-y-4"
+                          >
+                            {!viewingStudentResult.lastResult.topCareers ? (
+                              <div className="p-8 text-center text-slate-400 bg-slate-50 rounded-2xl border border-dashed border-slate-200">
+                                <Info className="w-8 h-8 mx-auto mb-2 opacity-20" />
+                                <p className="text-xs">Dữ liệu chi tiết chưa có cho bài đánh giá này.</p>
+                              </div>
+                            ) : (
+                              viewingStudentResult.lastResult.topCareers.map((career: any, idx: number) => (
+                                <div 
+                                  key={idx}
+                                  onClick={() => { setLocalCareerIndex(idx); setActiveTab('roadmap'); }}
+                                  className="group p-5 bg-white border border-slate-100 rounded-2xl shadow-sm hover:border-indigo-600 transition-all cursor-pointer relative overflow-hidden"
+                                >
+                                  <div className="absolute top-0 right-0 w-24 h-24 bg-indigo-500/5 -mr-12 -mt-12 rounded-full group-hover:bg-indigo-500/10 transition-colors" />
+                                  <div className="flex justify-between items-start mb-2">
+                                    <div>
+                                      <h4 className="font-black text-slate-900 text-lg leading-tight group-hover:text-indigo-600 transition-colors">{career.name}</h4>
+                                      <div className="flex items-center gap-2 text-indigo-500 text-[10px] font-bold uppercase tracking-widest mt-1">
+                                        {career.startingSalary} • {career.demandForecast}
+                                      </div>
+                                    </div>
+                                    <div className="px-3 py-1 bg-emerald-100 text-emerald-700 rounded-lg text-xs font-black">
+                                      {career.matchPercentage}%
+                                    </div>
+                                  </div>
+                                  <p className="text-xs text-slate-500 line-clamp-2 leading-relaxed mb-4">
+                                    {career.reason}
+                                  </p>
+                                  <div className="flex items-center justify-between pt-4 border-t border-slate-50">
+                                    <div className="flex gap-1.5">
+                                      {career.admissionSubjects?.slice(0, 3).map((sub: string, i: number) => (
+                                        <span key={i} className="px-2 py-0.5 bg-slate-100 text-slate-500 rounded-md text-[9px] font-bold">
+                                          {sub}
+                                        </span>
+                                      ))}
+                                    </div>
+                                    <span className="text-[10px] font-black text-indigo-600 flex items-center gap-1">
+                                      Xem lộ trình <ChevronRight className="w-3 h-3" />
+                                    </span>
+                                  </div>
+                                </div>
+                              ))
+                            )}
+                          </motion.div>
+                        )}
+
+                        {/* Roadmap Tab */}
+                        {activeTab === 'roadmap' && (
+                          <motion.div 
+                            initial={{ opacity: 0, y: 10 }}
+                            animate={{ opacity: 1, y: 0 }}
+                            className="space-y-6"
+                          >
+                            {!viewingStudentResult.lastResult.topCareers ? (
+                              <div className="p-8 text-center text-slate-400 bg-slate-50 rounded-2xl border border-dashed border-slate-200">
+                                <Info className="w-8 h-8 mx-auto mb-2 opacity-20" />
+                                <p className="text-xs">Dữ liệu lộ trình chưa được khởi tạo.</p>
+                              </div>
+                            ) : (
+                              <div className="space-y-6">
+                                {/* Career Selector if multiple exist */}
+                                <div className="flex gap-2 p-1 bg-slate-100 rounded-xl overflow-x-auto no-scrollbar">
+                                  {viewingStudentResult.lastResult.topCareers.map((c: any, i: number) => (
+                                    <button
+                                      key={i}
+                                      onClick={() => setLocalCareerIndex(i)}
+                                      className={cn(
+                                        "flex-1 px-3 py-2 rounded-lg text-[10px] font-bold transition-all whitespace-nowrap",
+                                        localCareerIndex === i 
+                                          ? "bg-white text-indigo-600 shadow-sm" 
+                                          : "text-slate-500 hover:text-slate-700"
+                                      )}
+                                    >
+                                      {c.name}
+                                    </button>
+                                  ))}
+                                </div>
+
+                                <div className="space-y-4 relative pl-4 border-l-2 border-indigo-100">
+                                  {viewingStudentResult.lastResult.topCareers[localCareerIndex].roadmap.map((step: any, idx: number) => (
+                                    <div key={idx} className="relative bg-white p-5 rounded-2xl border border-slate-100 shadow-sm">
+                                      <div className="absolute -left-[25px] top-6 w-4 h-4 rounded-full bg-white border-4 border-indigo-600 z-10" />
+                                      <div className="flex items-center justify-between mb-3">
+                                        <span className="text-[10px] font-black text-indigo-600 bg-indigo-50 px-2 py-0.5 rounded-full uppercase tracking-widest">{step.period}</span>
+                                        <span className="text-[10px] font-bold text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded-full uppercase tracking-widest leading-none flex flex-col items-center">
+                                          <span>{step.salary}</span>
+                                          {step.salary.includes('VNĐ') && <span className="text-[7px] font-black tracking-tighter -mt-0.5 uppercase">Mức lương</span>}
+                                        </span>
+                                      </div>
+                                      <h5 className="font-black text-slate-800 mb-2">{step.title}</h5>
+                                      <ul className="space-y-2 mb-4">
+                                        {step.goals.map((goal: string, gidx: number) => (
+                                          <li key={gidx} className="flex items-start gap-2 text-[11px] text-slate-600">
+                                            <div className="w-1 h-1 rounded-full bg-indigo-400 mt-1.5 shrink-0" />
+                                            {goal}
+                                          </li>
+                                        ))}
+                                      </ul>
+                                      <div className="flex flex-wrap gap-1.5">
+                                        {step.hardSkills.map((skill: string, sidx: number) => (
+                                          <span key={sidx} className="px-2 py-0.5 bg-slate-50 text-slate-500 rounded-md text-[9px] font-bold border border-slate-100">
+                                            {skill}
+                                          </span>
+                                        ))}
+                                      </div>
+                                    </div>
+                                  ))}
+                                </div>
+                              </div>
+                            )}
+                          </motion.div>
+                        )}
                       </div>
-                      <div className="p-4 bg-emerald-50 rounded-2xl border border-emerald-100">
-                        <p className="text-[10px] font-black text-emerald-400 uppercase tracking-widest mb-1">Độ phù hợp</p>
-                        <p className="text-lg font-black text-emerald-900">{viewingStudentResult.lastResult.matchPercentage}%</p>
+                    ) : (
+                      <div className="flex flex-col items-center justify-center py-20 bg-slate-50 rounded-[2rem] border-2 border-dashed border-slate-200 text-slate-400">
+                        <ShieldAlert className="w-12 h-12 mb-3 opacity-20" />
+                        <p className="font-medium text-center px-6">Học sinh chưa hoàn thành bài đánh giá nghề nghiệp.</p>
                       </div>
+                    )}
+                  </div>
+
+                  {/* Right Column: Feedback/Chat Box */}
+                  <div className="flex flex-col h-full min-h-[500px] border-l border-slate-100 pl-8">
+                    <div className="flex items-center justify-between mb-4">
+                      <h4 className="text-sm font-black text-slate-400 uppercase tracking-widest flex items-center gap-2">
+                        <Users className="w-4 h-4" /> Nhận xét & Trao đổi
+                      </h4>
+                      <span className="text-[10px] bg-indigo-100 text-indigo-600 px-2 py-0.5 rounded-full font-bold">
+                        {feedbacks.length} tin nhắn
+                      </span>
                     </div>
-                    <div className="space-y-2">
-                      <h4 className="font-bold text-slate-800">Tóm tắt phân tích:</h4>
-                      <p className="text-sm text-slate-600 leading-relaxed bg-slate-50 p-4 rounded-xl border border-slate-100 italic">
-                        "{viewingStudentResult.lastResult.summary}"
-                      </p>
-                    </div>
-                    <div className="space-y-2">
-                      <h4 className="font-bold text-slate-800">Lý do phù hợp:</h4>
-                      <ul className="space-y-2">
-                        {viewingStudentResult.lastResult.reasons?.map((r: string, i: number) => (
-                          <li key={i} className="flex items-start gap-2 text-sm text-slate-600">
-                            <CheckCircle className="w-4 h-4 text-emerald-500 mt-0.5 flex-shrink-0" />
-                            {r}
-                          </li>
-                        ))}
-                      </ul>
+
+                    <div className="flex-1 bg-slate-50/50 rounded-2xl overflow-hidden flex flex-col border border-slate-100">
+                      <div className="flex-1 overflow-y-auto p-4 space-y-4 custom-scrollbar">
+                        {feedbacks.length === 0 ? (
+                          <div className="h-full flex flex-col items-center justify-center text-slate-400 opacity-50 space-y-2">
+                            <Plus className="w-8 h-8" />
+                            <p className="text-xs text-center px-10">Chưa có nhận xét nào. Hãy bắt đầu trao đổi với học sinh.</p>
+                          </div>
+                        ) : (
+                          feedbacks.map((f, i) => (
+                            <div 
+                              key={f.id} 
+                              className={cn(
+                                "flex flex-col max-w-[85%]",
+                                f.senderId === auth.currentUser?.uid ? "ml-auto items-end" : "items-start"
+                              )}
+                            >
+                              <div className={cn(
+                                "px-4 py-3 rounded-2xl text-sm leading-relaxed",
+                                f.senderId === auth.currentUser?.uid 
+                                  ? "bg-indigo-600 text-white shadow-md rounded-tr-none" 
+                                  : "bg-white border border-slate-100 text-slate-700 shadow-sm rounded-tl-none"
+                              )}>
+                                {f.text}
+                              </div>
+                              <span className="text-[9px] text-slate-400 mt-1 font-bold px-1 uppercase tracking-tighter">
+                                {f.senderId === auth.currentUser?.uid ? "Bạn" : f.senderName} • {f.timestamp?.toDate().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                              </span>
+                            </div>
+                          ))
+                        )}
+                      </div>
+
+                      <div className="p-4 bg-white border-t border-slate-100">
+                        <div className="relative">
+                          <textarea 
+                            rows={3}
+                            value={newFeedback}
+                            onChange={(e) => setNewFeedback(e.target.value)}
+                            placeholder="Viết nhận xét hoặc lời khuyên..."
+                            className="w-full p-4 bg-slate-50 border-2 border-transparent focus:border-indigo-600 focus:bg-white rounded-2xl outline-none transition-all text-sm resize-none"
+                          />
+                          <button 
+                            onClick={handleSendFeedback}
+                            disabled={isSendingFeedback || !newFeedback.trim()}
+                            className="absolute bottom-3 right-3 p-3 bg-indigo-600 text-white rounded-xl shadow-lg hover:bg-indigo-700 transition-all disabled:opacity-50 disabled:grayscale"
+                          >
+                            {isSendingFeedback ? (
+                              <div className="w-5 h-5 border-2 border-white/20 border-t-white rounded-full animate-spin" />
+                            ) : (
+                              <ChevronRight className="w-5 h-5" />
+                            )}
+                          </button>
+                        </div>
+                      </div>
                     </div>
                   </div>
-                ) : (
-                  <div className="flex flex-col items-center justify-center py-12 text-slate-400">
-                    <ShieldAlert className="w-12 h-12 mb-2 opacity-20" />
-                    <p>Học sinh này chưa thực hiện đánh giá nghề nghiệp.</p>
-                  </div>
-                )}
+                </div>
               </div>
             </motion.div>
           </div>
@@ -924,13 +1526,14 @@ const LoginModal = ({ isOpen, onClose, onLogin }: { isOpen: boolean, onClose: ()
   if (!isOpen) return null;
 
   const handleResetPassword = async () => {
-    if (!email) {
+    const trimmedEmail = email.trim();
+    if (!trimmedEmail) {
       setAuthError("Vui lòng nhập Email để đặt lại mật khẩu.");
       return;
     }
     try {
-      await sendPasswordResetEmail(auth, email);
-      alert(`Link đặt lại mật khẩu đã được gửi đến ${email}. Vui lòng kiểm tra hộp thư.`);
+      await sendPasswordResetEmail(auth, trimmedEmail);
+      alert(`Link đặt lại mật khẩu đã được gửi đến ${trimmedEmail}. Vui lòng kiểm tra hộp thư.`);
       setAuthError(null);
     } catch (error: any) {
       console.error("Reset Password Error:", error);
@@ -942,12 +1545,32 @@ const LoginModal = ({ isOpen, onClose, onLogin }: { isOpen: boolean, onClose: ()
     }
   };
 
+  const validateEmail = (email: string) => {
+    return String(email)
+      .toLowerCase()
+      .match(/^[^\s@]+@[^\s@]+\.[^\s@]+$/);
+  };
+
   const handleEmailAuth = async (e: React.FormEvent) => {
     e.preventDefault();
+    const trimmedEmail = email.trim();
+    const trimmedDisplayName = displayName.trim();
+
     if (!selectedRole) {
       setAuthError("Vui lòng chọn vai trò trước khi tiếp tục.");
       return;
     }
+
+    if (!trimmedEmail) {
+      setAuthError("Vui lòng nhập Email.");
+      return;
+    }
+
+    if (!validateEmail(trimmedEmail)) {
+      setAuthError("Email không hợp lệ. Vui lòng kiểm tra lại.");
+      return;
+    }
+
     setIsLoading(true);
     setAuthError(null);
 
@@ -964,7 +1587,7 @@ const LoginModal = ({ isOpen, onClose, onLogin }: { isOpen: boolean, onClose: ()
         const response = await fetch("/api/send-otp", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ email }),
+          body: JSON.stringify({ email: trimmedEmail }),
         });
 
         const result = await response.json();
@@ -972,11 +1595,11 @@ const LoginModal = ({ isOpen, onClose, onLogin }: { isOpen: boolean, onClose: ()
           throw new Error(result.error || "Lỗi gửi mã OTP");
         }
 
-        alert(`Mã xác minh đã được gửi đến email ${email}. Vui lòng kiểm tra hộp thư.`);
+        alert(`Mã xác minh đã được gửi đến email ${trimmedEmail}. Vui lòng kiểm tra hộp thư.`);
         setStep('verification');
       } else {
         // Login flow
-        const result = await signInWithEmailAndPassword(auth, email, password);
+        const result = await signInWithEmailAndPassword(auth, trimmedEmail, password);
         const user = result.user;
 
         const userRef = doc(db, 'users', user.uid);
@@ -1000,7 +1623,7 @@ const LoginModal = ({ isOpen, onClose, onLogin }: { isOpen: boolean, onClose: ()
         await setDoc(userRef, {
           uid: user.uid,
           email: user.email,
-          displayName: user.displayName || displayName,
+          displayName: user.displayName || trimmedDisplayName,
           role: roleToUse,
           userCode: userCode,
           lastLogin: serverTimestamp(),
@@ -1011,14 +1634,19 @@ const LoginModal = ({ isOpen, onClose, onLogin }: { isOpen: boolean, onClose: ()
       }
     } catch (error: any) {
       console.error("Auth Error:", error);
-      if (error.code === 'auth/invalid-credential') {
+      const errorCode = error.code || "";
+      const errorMessage = error.message || "";
+
+      if (errorCode === 'auth/invalid-credential' || errorMessage.includes('invalid-credential')) {
         setAuthError("Email hoặc mật khẩu không chính xác.");
-      } else if (error.code === 'auth/user-not-found') {
+      } else if (errorCode === 'auth/user-not-found') {
         setAuthError("Tài khoản không tồn tại.");
-      } else if (error.code === 'auth/wrong-password') {
+      } else if (errorCode === 'auth/wrong-password') {
         setAuthError("Mật khẩu không chính xác.");
+      } else if (errorMessage.toLowerCase().includes('pattern') || errorMessage.includes('expected pattern')) {
+        setAuthError("Dữ liệu nhập vào chưa đúng định dạng. Vui lòng kiểm tra lại.");
       } else {
-        setAuthError(error.message || "Đã có lỗi xảy ra.");
+        setAuthError(errorMessage || "Đã có lỗi xảy ra.");
       }
     } finally {
       setIsLoading(false);
@@ -1077,17 +1705,25 @@ const LoginModal = ({ isOpen, onClose, onLogin }: { isOpen: boolean, onClose: ()
 
   const handleVerifyCode = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!selectedRole || !email) return;
+    const trimmedEmail = email.trim();
+    const trimmedDisplayName = displayName.trim();
+    if (!selectedRole || !trimmedEmail) return;
     
     setIsVerifying(true);
     setAuthError(null);
+    
+    if (!inputCode || inputCode.length !== 6) {
+      setAuthError("Vui lòng nhập mã OTP gồm 6 chữ số.");
+      setIsVerifying(false);
+      return;
+    }
     
     try {
       // Verify OTP with backend
       const response = await fetch("/api/verify-otp", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email, otp: inputCode }),
+        body: JSON.stringify({ email: trimmedEmail, otp: inputCode }),
       });
 
       const result = await response.json();
@@ -1098,9 +1734,9 @@ const LoginModal = ({ isOpen, onClose, onLogin }: { isOpen: boolean, onClose: ()
       // OTP verified, now create Firebase user
       setIsLoading(true);
       try {
-        const authResult = await createUserWithEmailAndPassword(auth, email, password);
+        const authResult = await createUserWithEmailAndPassword(auth, trimmedEmail, password);
         const user = authResult.user;
-        await updateProfile(user, { displayName });
+        await updateProfile(user, { displayName: trimmedDisplayName });
 
         const userRef = doc(db, 'users', user.uid);
         const { code, role } = await generateUserCode(selectedRole, user.email);
@@ -1108,7 +1744,7 @@ const LoginModal = ({ isOpen, onClose, onLogin }: { isOpen: boolean, onClose: ()
         await setDoc(userRef, {
           uid: user.uid,
           email: user.email,
-          displayName: user.displayName || displayName,
+          displayName: user.displayName || trimmedDisplayName,
           role: role,
           userCode: code,
           lastLogin: serverTimestamp(),
@@ -1443,7 +2079,211 @@ export default function App() {
   const [userEmail, setUserEmail] = useState('');
   const [userRole, setUserRole] = useState<string | null>(null);
   const [currentUserData, setCurrentUserData] = useState<any>(null);
+  const [pendingInvites, setPendingInvites] = useState<any[]>([]);
+  const [teacherInvites, setTeacherInvites] = useState<any[]>([]);
+  const [teacherClasses, setTeacherClasses] = useState<any[]>([]);
+  const [initialClassId, setInitialClassId] = useState<string | null>(null);
+  const [classToDelete, setClassToDelete] = useState<any | null>(null);
+  const [isDeletingClass, setIsDeletingClass] = useState(false);
+
+  const handleDeleteClass = async () => {
+    if (!classToDelete || !auth.currentUser) return;
+    if (classToDelete.teacherId !== auth.currentUser.uid) {
+      alert("Chỉ chủ lớp học mới có quyền xóa lớp.");
+      return;
+    }
+
+    setIsDeletingClass(true);
+    try {
+      await deleteDoc(doc(db, 'classes', classToDelete.id));
+      setClassToDelete(null);
+    } catch (error) {
+      handleFirestoreError(error, OperationType.DELETE, `classes/${classToDelete.id}`);
+      alert("Lỗi khi xóa lớp học.");
+    } finally {
+      setIsDeletingClass(false);
+    }
+  };
+
+  // Fetch pending invites for student
+  useEffect(() => {
+    if (isLoggedIn && userRole === 'student' && auth.currentUser) {
+      const q = query(
+        collection(db, 'classes'), 
+        where('pendingStudentIds', 'array-contains', auth.currentUser.uid)
+      );
+      const unsubscribe = onSnapshot(q, (snapshot) => {
+        const invitesList = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+        setPendingInvites(invitesList);
+      }, (error) => {
+        handleFirestoreError(error, OperationType.LIST, 'classes');
+      });
+      return () => unsubscribe();
+    } else {
+      setPendingInvites([]);
+    }
+  }, [isLoggedIn, userRole]);
+
+  // Fetch pending invites for teacher
+  useEffect(() => {
+    if (isLoggedIn && userRole === 'teacher' && auth.currentUser) {
+      const q = query(
+        collection(db, 'classes'), 
+        where('pendingTeacherIds', 'array-contains', auth.currentUser.uid)
+      );
+      const unsubscribe = onSnapshot(q, (snapshot) => {
+        const invitesList = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+        setTeacherInvites(invitesList);
+      }, (error) => {
+        handleFirestoreError(error, OperationType.LIST, 'classes');
+      });
+      return () => unsubscribe();
+    } else {
+      setTeacherInvites([]);
+    }
+  }, [isLoggedIn, userRole]);
+
+  // Fetch teacher classes
+  useEffect(() => {
+    if (isLoggedIn && userRole === 'teacher' && auth.currentUser) {
+      const q = query(
+        collection(db, 'classes'), 
+        or(where('teacherId', '==', auth.currentUser.uid), where('coTeacherIds', 'array-contains', auth.currentUser.uid))
+      );
+      const unsubscribe = onSnapshot(q, (snapshot) => {
+        const classesList = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+        setTeacherClasses(classesList);
+      }, (error) => {
+        handleFirestoreError(error, OperationType.LIST, 'classes');
+      });
+      return () => unsubscribe();
+    } else {
+      setTeacherClasses([]);
+    }
+  }, [isLoggedIn, userRole]);
+
+  const handleAcceptInvite = async (classId: string) => {
+    if (!auth.currentUser) return;
+    try {
+      const classRef = doc(db, 'classes', classId);
+      const classDoc = await getDoc(classRef);
+      if (!classDoc.exists()) return;
+      
+      const data = classDoc.data();
+      const updatedStudentIds = Array.from(new Set([...(data.studentIds || []), auth.currentUser.uid]));
+      const updatedPendingIds = (data.pendingStudentIds || []).filter((id: string) => id !== auth.currentUser.uid);
+      
+      await updateDoc(classRef, {
+        studentIds: updatedStudentIds,
+        pendingStudentIds: updatedPendingIds
+      });
+      alert("Đã chấp nhận lời mời vào lớp!");
+    } catch (error) {
+      handleFirestoreError(error, OperationType.UPDATE, `classes/${classId}`);
+      alert("Lỗi khi chấp nhận lời mời.");
+    }
+  };
+
+  const handleDeclineInvite = async (classId: string) => {
+    if (!auth.currentUser) return;
+    try {
+      const classRef = doc(db, 'classes', classId);
+      const classDoc = await getDoc(classRef);
+      if (!classDoc.exists()) return;
+      
+      const data = classDoc.data();
+      const updatedPendingIds = Array.from(new Set((data.pendingStudentIds || []).filter((id: string) => id !== auth.currentUser.uid)));
+      
+      await updateDoc(classRef, {
+        pendingStudentIds: updatedPendingIds
+      });
+      alert("Đã từ chối lời mời.");
+    } catch (error) {
+      handleFirestoreError(error, OperationType.UPDATE, `classes/${classId}`);
+      alert("Lỗi khi từ chối lời mời.");
+    }
+  };
+
+  const handleAcceptTeacherInvite = async (classId: string) => {
+    if (!auth.currentUser) return;
+    try {
+      const classRef = doc(db, 'classes', classId);
+      const classDoc = await getDoc(classRef);
+      if (!classDoc.exists()) return;
+      
+      const data = classDoc.data();
+      const updatedCoTeacherIds = Array.from(new Set([...(data.coTeacherIds || []), auth.currentUser.uid]));
+      const updatedPendingIds = (data.pendingTeacherIds || []).filter((id: string) => id !== auth.currentUser.uid);
+      
+      await updateDoc(classRef, {
+        coTeacherIds: updatedCoTeacherIds,
+        pendingTeacherIds: updatedPendingIds
+      });
+      alert("Đã chấp nhận lời mời làm đồng nghiệp!");
+    } catch (error) {
+      handleFirestoreError(error, OperationType.UPDATE, `classes/${classId}`);
+      alert("Lỗi khi chấp nhận lời mời.");
+    }
+  };
+
+  const handleDeclineTeacherInvite = async (classId: string) => {
+    if (!auth.currentUser) return;
+    try {
+      const classRef = doc(db, 'classes', classId);
+      const classDoc = await getDoc(classRef);
+      if (!classDoc.exists()) return;
+      
+      const data = classDoc.data();
+      const updatedPendingIds = Array.from(new Set((data.pendingTeacherIds || []).filter((id: string) => id !== auth.currentUser.uid)));
+      
+      await updateDoc(classRef, {
+        pendingTeacherIds: updatedPendingIds
+      });
+      alert("Đã từ chối lời mời.");
+    } catch (error) {
+      handleFirestoreError(error, OperationType.UPDATE, `classes/${classId}`);
+      alert("Lỗi khi từ chối lời mời.");
+    }
+  };
+
   const [loading, setLoading] = useState(false);
+  const [teacherFeedbacks, setTeacherFeedbacks] = useState<any[]>([]);
+  const [studentReply, setStudentReply] = useState("");
+  const [isSendingReply, setIsSendingReply] = useState(false);
+
+  useEffect(() => {
+    if (isLoggedIn && auth.currentUser && userRole === 'student') {
+      const q = query(
+        collection(db, 'users', auth.currentUser.uid, 'feedbacks'),
+        orderBy('timestamp', 'asc')
+      );
+      const unsubscribe = onSnapshot(q, (snapshot) => {
+        const list = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+        setTeacherFeedbacks(list);
+      });
+      return () => unsubscribe();
+    }
+  }, [isLoggedIn, userRole]);
+
+  const handleSendReply = async () => {
+    if (!studentReply.trim() || !auth.currentUser) return;
+    setIsSendingReply(true);
+    try {
+      const feedbacksRef = collection(db, 'users', auth.currentUser.uid, 'feedbacks');
+      await addDoc(feedbacksRef, {
+        senderId: auth.currentUser.uid,
+        senderName: auth.currentUser.displayName || 'Học sinh',
+        text: studentReply,
+        timestamp: serverTimestamp(),
+        isTeacher: false
+      });
+      setStudentReply("");
+    } catch (error) {
+      console.error("Error sending reply:", error);
+    } finally {
+      setIsSendingReply(false);
+    }
+  };
 
   // Refs for scroll containers
   const homeContainerRef = React.useRef<HTMLDivElement>(null);
@@ -1688,7 +2528,18 @@ export default function App() {
               matchPercentage: topCareer.matchPercentage,
               summary: resultData.overallSummary,
               reasons: [topCareer.reason],
-              timestamp: serverTimestamp()
+              mbti: data.mbti,
+              holland: data.holland.join(', '),
+              gpa: data.gpa,
+              interests: data.interests,
+              subjects: data.subjects,
+              timestamp: serverTimestamp(),
+              // Additional fields for full teacher visibility
+              topCareers: resultData.topCareers,
+              contingencyPlans: resultData.contingencyPlans,
+              skillsToDevelop: resultData.skillsToDevelop,
+              overallSummary: resultData.overallSummary,
+              assessmentData: data
             }
           });
 
@@ -2148,7 +2999,11 @@ export default function App() {
         )}
 
         {showClassManagement && auth.currentUser && (
-          <ClassManagement onClose={() => setShowClassManagement(false)} teacherId={auth.currentUser.uid} />
+          <ClassManagement 
+            onClose={() => { setShowClassManagement(false); setInitialClassId(null); }} 
+            teacherId={auth.currentUser.uid} 
+            initialClassId={initialClassId}
+          />
         )}
       </AnimatePresence>
 
@@ -2181,6 +3036,103 @@ export default function App() {
               </div>
             )}
             {!showAbout && !showDictionary && !showRanking && !showCertificates && !showStats && <ProgressBar currentStep={step} />}
+
+      // Class Invitations Section
+            {isLoggedIn && (((userRole === 'student' && pendingInvites.length > 0) || (userRole === 'teacher' && teacherInvites.length > 0))) && step === 0 && !showAbout && !showDictionary && !showRanking && (
+              <motion.div 
+                initial={{ opacity: 0, y: -20 }}
+                animate={{ opacity: 1, y: 0 }}
+                className={clsx("mt-8 mb-4 max-w-2xl mx-auto", userRole === 'teacher' && "order-first")}
+              >
+                <div className={clsx("border rounded-[2rem] p-6 shadow-sm", userRole === 'teacher' ? "bg-violet-50 border-violet-200" : "bg-amber-50 border-amber-200")}>
+                  <div className="flex items-center gap-3 mb-4">
+                    <div className={clsx("w-10 h-10 rounded-xl flex items-center justify-center", userRole === 'teacher' ? "bg-violet-100 text-violet-600" : "bg-amber-100 text-amber-600")}>
+                      <Mail className="w-5 h-5" />
+                    </div>
+                    <div>
+                      <h3 className="font-bold text-slate-900">Lời mời vào lớp học</h3>
+                      <p className={clsx("text-xs font-medium", userRole === 'teacher' ? "text-violet-700" : "text-amber-700")}>
+                        Bạn có {(userRole === 'teacher' ? teacherInvites : pendingInvites).length} lời mời đang chờ xác nhận
+                      </p>
+                    </div>
+                  </div>
+                  <div className="space-y-3">
+                    {(userRole === 'teacher' ? teacherInvites : pendingInvites).map((invite) => (
+                      <div key={invite.id} className="bg-white/80 backdrop-blur-sm p-4 rounded-2xl border border-slate-100 flex items-center justify-between">
+                        <div>
+                          <p className="font-black text-slate-800 text-sm">Lớp {invite.name}</p>
+                          <p className="text-[10px] text-slate-500 font-bold uppercase tracking-wider">
+                            {userRole === 'teacher' ? 'Lời mời làm đồng nghiệp' : 'Từ Giáo viên của bạn'}
+                          </p>
+                        </div>
+                        <div className="flex gap-2">
+                          <button 
+                            onClick={() => userRole === 'teacher' ? handleAcceptTeacherInvite(invite.id) : handleAcceptInvite(invite.id)}
+                            className={clsx(
+                              "px-4 py-2 text-white rounded-xl text-xs font-black shadow-lg transition-all",
+                              userRole === 'teacher' ? "bg-violet-600 shadow-violet-100 hover:bg-violet-700" : "bg-indigo-600 shadow-indigo-100 hover:bg-indigo-700"
+                            )}
+                          >
+                            Đồng ý
+                          </button>
+                          <button 
+                            onClick={() => userRole === 'teacher' ? handleDeclineTeacherInvite(invite.id) : handleDeclineInvite(invite.id)}
+                            className="px-4 py-2 bg-slate-100 text-slate-500 rounded-xl text-xs font-bold hover:bg-slate-200 transition-all"
+                          >
+                            Từ chối
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </motion.div>
+            )}
+
+            {/* Class Deletion Confirmation Overlay */}
+            <AnimatePresence>
+              {classToDelete && (
+                <motion.div 
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  exit={{ opacity: 0 }}
+                  className="fixed inset-0 z-[200] bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4"
+                >
+                  <motion.div 
+                    initial={{ scale: 0.9, opacity: 0 }}
+                    animate={{ scale: 1, opacity: 1 }}
+                    exit={{ scale: 0.9, opacity: 0 }}
+                    className="bg-white rounded-[2rem] p-8 max-w-sm w-full shadow-2xl text-center"
+                  >
+                    <div className="w-16 h-16 bg-rose-100 text-rose-600 rounded-2xl flex items-center justify-center mx-auto mb-4">
+                      <Trash2 className="w-8 h-8" />
+                    </div>
+                    <h3 className="text-xl font-black text-slate-900 mb-2">Xóa lớp học?</h3>
+                    <p className="text-slate-500 text-sm mb-8">
+                      Bạn có chắc muốn xóa lớp <span className="font-bold text-slate-900">"{classToDelete.name}"</span>? 
+                      Hành động này không thể hoàn tác và toàn bộ dữ liệu lớp sẽ bị mất.
+                    </p>
+                    <div className="flex gap-3">
+                      <button 
+                        onClick={handleDeleteClass}
+                        disabled={isDeletingClass}
+                        className="flex-1 py-3 bg-rose-600 text-white rounded-xl font-bold hover:bg-rose-700 transition-all flex items-center justify-center gap-2"
+                      >
+                        {isDeletingClass ? <div className="w-4 h-4 border-2 border-white/20 border-t-white rounded-full animate-spin" /> : <Trash2 className="w-4 h-4" />}
+                        Xác nhận xóa
+                      </button>
+                      <button 
+                        onClick={() => setClassToDelete(null)}
+                        disabled={isDeletingClass}
+                        className="flex-1 py-3 bg-slate-100 text-slate-600 rounded-xl font-bold hover:bg-slate-200 transition-all"
+                      >
+                        Hủy
+                      </button>
+                    </div>
+                  </motion.div>
+                </motion.div>
+              )}
+            </AnimatePresence>
 
             <AnimatePresence mode="wait">
               {showAbout && (
@@ -2223,16 +3175,65 @@ export default function App() {
                     
                     <div className="grid grid-cols-1 md:grid-cols-3 gap-6 text-center">
                       {userRole === 'teacher' ? (
-                        <div 
-                          onClick={() => { resetNavigation(); setShowClassManagement(true); }}
-                          className="p-6 bg-violet-50 rounded-2xl border-2 border-dashed border-violet-200 shadow-sm hover:shadow-md transition-all cursor-pointer group"
-                        >
-                          <div className="w-12 h-12 rounded-xl bg-violet-100 text-violet-600 flex items-center justify-center mb-4 mx-auto group-hover:scale-110 transition-transform">
-                            <Plus className="w-6 h-6" />
+                        <>
+                          <div 
+                            onClick={() => { resetNavigation(); setInitialClassId(null); setShowClassManagement(true); }}
+                            className="p-6 bg-white rounded-2xl border-2 border-dashed border-slate-200 shadow-sm hover:border-indigo-600 hover:bg-indigo-50/30 transition-all cursor-pointer group flex flex-col items-center justify-center min-h-[160px]"
+                          >
+                            <div className="w-12 h-12 rounded-xl bg-indigo-100 text-indigo-600 flex items-center justify-center mb-3 group-hover:scale-110 transition-transform">
+                              <Plus className="w-6 h-6" />
+                            </div>
+                            <h3 className="font-bold text-slate-800 mb-1">Tạo lớp học</h3>
+                            <p className="text-[10px] text-slate-500 uppercase font-black tracking-widest">Thêm lớp mới</p>
                           </div>
-                          <h3 className="font-bold text-slate-800 mb-1">Tạo lớp học</h3>
-                          <p className="text-sm text-slate-500 leading-relaxed">Quản lý học sinh và xem kết quả đánh giá.</p>
-                        </div>
+
+                          {teacherClasses.map((c) => (
+                            <div 
+                              key={c.id}
+                              onClick={() => { resetNavigation(); setInitialClassId(c.id); setShowClassManagement(true); }}
+                              className="p-6 bg-white rounded-2xl border border-slate-100 shadow-sm hover:shadow-xl hover:border-indigo-100 hover:-translate-y-1 transition-all cursor-pointer text-left group flex flex-col justify-between min-h-[160px]"
+                            >
+                              <div>
+                                <div className="flex items-center justify-between mb-3">
+                                  <div className="w-10 h-10 rounded-xl bg-slate-100 text-slate-600 flex items-center justify-center group-hover:bg-indigo-600 group-hover:text-white transition-all">
+                                    <ClipboardList className="w-5 h-5" />
+                                  </div>
+                                  <div className="flex flex-col items-end gap-1">
+                                    {c.teacherId !== auth.currentUser?.uid && (
+                                      <span className="text-[8px] font-black text-violet-600 bg-violet-100 px-1.5 py-0.5 rounded uppercase flex items-center gap-1">
+                                        <Users className="w-2.5 h-2.5" />
+                                        Đồng nghiệp
+                                      </span>
+                                    )}
+                                    <span className="text-[10px] font-black text-indigo-600 bg-indigo-50 px-2 py-1 rounded-lg">
+                                      {c.studentIds?.length || 0} HS
+                                    </span>
+                                  </div>
+                                </div>
+                                <h3 className="font-black text-slate-900 text-lg mb-1 truncate">{c.name}</h3>
+                                <p className="text-xs text-slate-400 font-medium">Quản lý và xem kết quả</p>
+                              </div>
+                              <div className="mt-4 flex items-center justify-between">
+                                <div className="flex items-center gap-1 text-indigo-600 font-bold text-xs opacity-0 group-hover:opacity-100 transition-all">
+                                  <span>Chi tiết</span>
+                                  <ChevronRight className="w-4 h-4" />
+                                </div>
+                                {c.teacherId === auth.currentUser?.uid && (
+                                  <button
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      setClassToDelete(c);
+                                    }}
+                                    className="p-2 text-slate-300 hover:text-rose-500 hover:bg-rose-50 rounded-xl transition-all opacity-0 group-hover:opacity-100"
+                                    title="Xóa lớp học"
+                                  >
+                                    <Trash2 className="w-4 h-4" />
+                                  </button>
+                                )}
+                              </div>
+                            </div>
+                          ))}
+                        </>
                       ) : (
                         <>
                           {[
@@ -3600,87 +4601,155 @@ export default function App() {
                       </div>
                     </div>
                   </div>
-
-                  {/* AI Counselor Chatbox */}
-                  <div id="ai-counselor" className="mt-16 bg-white rounded-3xl border border-slate-200 shadow-xl overflow-hidden flex flex-col h-[600px]">
-                    <div className="p-6 bg-indigo-600 text-white flex items-center gap-4 selection:bg-white/30">
-                      <div className="w-12 h-12 bg-white/20 rounded-full flex items-center justify-center backdrop-blur-sm">
-                        <Sparkles className="w-6 h-6 text-indigo-100" />
+                  {/* AI Counselor Chatbox & Teacher Feedback Row */}
+                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 mt-16">
+                    {/* AI Counselor Chatbox */}
+                    <div id="ai-counselor" className="bg-white rounded-3xl border border-slate-200 shadow-xl overflow-hidden flex flex-col h-[600px]">
+                      <div className="p-6 bg-indigo-600 text-white flex items-center gap-4 selection:bg-white/30">
+                        <div className="w-12 h-12 bg-white/20 rounded-full flex items-center justify-center backdrop-blur-sm">
+                          <Sparkles className="w-6 h-6 text-indigo-100" />
+                        </div>
+                        <div>
+                          <h3 className="text-xl font-bold">Chuyên gia Tư vấn AI</h3>
+                          <p className="text-indigo-200 text-sm">Hỏi thêm về lộ trình, trường đại học hoặc ngành nghề</p>
+                        </div>
                       </div>
-                      <div>
-                        <h3 className="text-xl font-bold">Chuyên gia Tư vấn AI</h3>
-                        <p className="text-indigo-200 text-sm">Hỏi thêm về lộ trình, trường đại học hoặc ngành nghề</p>
-                      </div>
-                    </div>
-                    
-                    <div 
-                      ref={chatContainerRef}
-                      className="flex-1 overflow-y-auto p-6 space-y-6 bg-slate-50"
-                    >
-                      {chatMessages.map((msg, idx) => (
-                        <div key={idx} className={cn(
-                          "flex max-w-[85%] gap-4",
-                          msg.role === 'user' ? "ml-auto flex-row-reverse" : ""
-                        )}>
-                          <div className={cn(
-                            "w-10 h-10 rounded-full flex items-center justify-center flex-shrink-0",
-                            msg.role === 'user' ? "bg-slate-200 text-slate-600" : "bg-indigo-100 text-indigo-600"
-                          )}>
-                            {msg.role === 'user' ? <div className="font-bold text-sm">Bạn</div> : <Sparkles className="w-5 h-5" />}
-                          </div>
-                          <div className={cn(
-                            "p-4 rounded-2xl text-sm leading-relaxed",
-                            msg.role === 'user' 
-                              ? "bg-indigo-600 text-[#ffffff] rounded-tr-sm selection:bg-white/30" 
-                              : "bg-white border border-slate-200 text-slate-700 rounded-tl-sm shadow-sm"
+                      
+                      <div 
+                        ref={chatContainerRef}
+                        className="flex-1 overflow-y-auto p-6 space-y-6 bg-slate-50"
+                      >
+                        {chatMessages.map((msg, idx) => (
+                          <div key={idx} className={cn(
+                            "flex max-w-[85%] gap-4",
+                            msg.role === 'user' ? "ml-auto flex-row-reverse" : ""
                           )}>
                             <div className={cn(
-                              "prose prose-sm max-w-none",
-                              msg.role === 'user' ? "prose-invert !text-[#ffffff] prose-p:!text-[#ffffff] prose-headings:!text-[#ffffff] prose-strong:!text-[#ffffff]" : "prose-slate"
+                              "w-10 h-10 rounded-full flex items-center justify-center flex-shrink-0",
+                              msg.role === 'user' ? "bg-slate-200 text-slate-600" : "bg-indigo-100 text-indigo-600"
                             )}>
-                              <Markdown>
-                                {msg.text}
-                              </Markdown>
+                              {msg.role === 'user' ? <div className="font-bold text-sm">Bạn</div> : <Sparkles className="w-5 h-5" />}
+                            </div>
+                            <div className={cn(
+                              "p-4 rounded-2xl text-sm leading-relaxed",
+                              msg.role === 'user' 
+                                ? "bg-indigo-600 text-[#ffffff] rounded-tr-sm selection:bg-white/30" 
+                                : "bg-white border border-slate-200 text-slate-700 rounded-tl-sm shadow-sm"
+                            )}>
+                              <div className={cn(
+                                "prose prose-sm max-w-none",
+                                msg.role === 'user' ? "prose-invert !text-[#ffffff] prose-p:!text-[#ffffff] prose-headings:!text-[#ffffff] prose-strong:!text-[#ffffff]" : "prose-slate"
+                              )}>
+                                <Markdown>
+                                  {msg.text}
+                                </Markdown>
+                              </div>
                             </div>
                           </div>
-                        </div>
-                      ))}
-                      {isChatLoading && (
-                        <div className="flex max-w-[85%] gap-4">
-                          <div className="w-10 h-10 rounded-full bg-indigo-100 text-indigo-600 flex items-center justify-center flex-shrink-0">
-                            <Sparkles className="w-5 h-5" />
+                        ))}
+                        {isChatLoading && (
+                          <div className="flex max-w-[85%] gap-4">
+                            <div className="w-10 h-10 rounded-full bg-indigo-100 text-indigo-600 flex items-center justify-center flex-shrink-0">
+                              <Sparkles className="w-5 h-5" />
+                            </div>
+                            <div className="p-4 rounded-2xl bg-white border border-slate-200 text-slate-500 rounded-tl-sm shadow-sm flex items-center gap-2">
+                              <div className="w-2 h-2 bg-indigo-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }}></div>
+                              <div className="w-2 h-2 bg-indigo-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }}></div>
+                              <div className="w-2 h-2 bg-indigo-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }}></div>
+                            </div>
                           </div>
-                          <div className="p-4 rounded-2xl bg-white border border-slate-200 text-slate-500 rounded-tl-sm shadow-sm flex items-center gap-2">
-                            <div className="w-2 h-2 bg-indigo-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }}></div>
-                            <div className="w-2 h-2 bg-indigo-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }}></div>
-                            <div className="w-2 h-2 bg-indigo-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }}></div>
-                          </div>
+                        )}
+                      </div>
+
+                      <div className="p-4 bg-white border-t border-slate-200">
+                        <div className="flex gap-2">
+                          <input 
+                            type="text" 
+                            value={chatInput}
+                            onChange={(e) => setChatInput(e.target.value)}
+                            onKeyDown={(e) => e.key === 'Enter' && handleSendMessage()}
+                            placeholder="Nhập câu hỏi của bạn..."
+                            className="flex-1 px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:bg-white transition-all"
+                          />
+                          <button 
+                            onClick={handleSendMessage}
+                            disabled={isChatLoading || !chatInput.trim()}
+                            className="px-6 py-3 bg-indigo-600 text-white rounded-xl font-bold hover:bg-indigo-700 transition-all disabled:opacity-50 disabled:cursor-not-allowed selection:bg-white/30"
+                          >
+                            Gửi
+                          </button>
                         </div>
-                      )}
+                      </div>
                     </div>
 
-                    <div className="p-4 bg-white border-t border-slate-200">
-                      <div className="flex gap-2">
-                        <input 
-                          type="text" 
-                          value={chatInput}
-                          onChange={(e) => setChatInput(e.target.value)}
-                          onKeyDown={(e) => e.key === 'Enter' && handleSendMessage()}
-                          placeholder="Nhập câu hỏi của bạn..."
-                          className="flex-1 px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:bg-white transition-all"
-                        />
-                        <button 
-                          onClick={handleSendMessage}
-                          disabled={isChatLoading || !chatInput.trim()}
-                          className="px-6 py-3 bg-indigo-600 text-white rounded-xl font-bold hover:bg-indigo-700 transition-all disabled:opacity-50 disabled:cursor-not-allowed selection:bg-white/30"
-                        >
-                          Gửi
-                        </button>
+                    {/* Teacher Feedback Chatbox */}
+                    <div id="teacher-feedback" className="bg-white rounded-3xl border border-slate-200 shadow-xl overflow-hidden flex flex-col h-[600px]">
+                      <div className="p-6 bg-emerald-600 text-white flex items-center gap-4 selection:bg-white/30">
+                        <div className="w-12 h-12 bg-white/20 rounded-full flex items-center justify-center backdrop-blur-sm">
+                          <UserCheck className="w-6 h-6 text-emerald-100" />
+                        </div>
+                        <div>
+                          <h3 className="text-xl font-bold">Trao đổi với Thầy/Cô</h3>
+                          <p className="text-emerald-100 text-sm">Nhận xét chuyên môn và lời khuyên từ giáo viên</p>
+                        </div>
+                      </div>
+
+                      <div className="flex-1 overflow-y-auto p-6 space-y-6 bg-slate-50/50 custom-scrollbar">
+                        {teacherFeedbacks.length === 0 ? (
+                          <div className="h-full flex flex-col items-center justify-center text-slate-400 opacity-50 space-y-4 px-10">
+                            <div className="p-6 bg-white rounded-3xl border border-slate-100 shadow-sm">
+                              <ClipboardList className="w-12 h-12 mx-auto mb-3" />
+                              <p className="text-center text-sm font-medium">Báo cáo của bạn đang chờ thầy cô xem xét và gửi nhận xét.</p>
+                            </div>
+                          </div>
+                        ) : (
+                          teacherFeedbacks.map((f, i) => (
+                            <div 
+                              key={f.id} 
+                              className={cn(
+                                "flex flex-col max-w-[85%]",
+                                f.senderId === auth.currentUser?.uid ? "ml-auto items-end" : "items-start"
+                              )}
+                            >
+                              <div className={cn(
+                                "px-4 py-3 rounded-2xl text-sm leading-relaxed",
+                                f.senderId === auth.currentUser?.uid 
+                                  ? "bg-emerald-600 text-white shadow-md rounded-tr-none" 
+                                  : "bg-white border border-slate-100 text-slate-700 shadow-sm rounded-tl-none"
+                              )}>
+                                {f.text}
+                              </div>
+                              <span className="text-[9px] text-slate-400 mt-1 font-bold px-1 uppercase tracking-tighter">
+                                {f.senderId === auth.currentUser?.uid ? "Bạn" : f.senderName} • {f.timestamp?.toDate().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                              </span>
+                            </div>
+                          ))
+                        )}
+                      </div>
+
+                      <div className="p-4 bg-white border-t border-slate-200">
+                        <div className="flex gap-2">
+                          <input 
+                            type="text" 
+                            value={studentReply}
+                            onChange={(e) => setStudentReply(e.target.value)}
+                            onKeyDown={(e) => e.key === 'Enter' && handleSendReply()}
+                            placeholder="Gửi tin nhắn cho thầy cô..."
+                            className="flex-1 px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:bg-white transition-all"
+                          />
+                          <button 
+                            onClick={handleSendReply}
+                            disabled={isSendingReply || !studentReply.trim()}
+                            className="px-6 py-3 bg-emerald-600 text-white rounded-xl font-bold hover:bg-emerald-700 transition-all disabled:opacity-50 disabled:cursor-not-allowed selection:bg-white/30"
+                          >
+                            {isSendingReply ? "..." : "Gửi"}
+                          </button>
+                        </div>
                       </div>
                     </div>
                   </div>
-                  </>
-                ) : (
+              </>
+            ) : (
                     <div className="mt-16 bg-indigo-50 p-8 md:p-12 rounded-[3rem] border border-indigo-100 text-center space-y-6">
                       <div className="w-16 h-16 bg-indigo-100 text-indigo-600 rounded-2xl flex items-center justify-center mx-auto shadow-sm">
                         <Lock className="w-8 h-8" />

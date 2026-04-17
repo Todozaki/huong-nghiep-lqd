@@ -20,7 +20,17 @@
             "matchPercentage": { "type": "number" },
             "summary": { "type": "string" },
             "reasons": { "type": "array", "items": { "type": "string" } },
-            "timestamp": { "type": "string", "format": "date-time" }
+            "timestamp": { "type": "string", "format": "date-time" },
+            "topCareers": { "type": "array" },
+            "contingencyPlans": { "type": "array" },
+            "skillsToDevelop": { "type": "array" },
+            "overallSummary": { "type": "string" },
+            "assessmentData": { "type": "object" },
+            "mbti": { "type": "string" },
+            "holland": { "type": "string" },
+            "gpa": { "type": "number" },
+            "interests": { "type": "array" },
+            "subjects": { "type": "object" }
           }
         }
       },
@@ -33,7 +43,9 @@
       "properties": {
         "name": { "type": "string", "description": "Name of the class" },
         "teacherId": { "type": "string", "description": "UID of the teacher who owns the class" },
-        "studentIds": { "type": "array", "items": { "type": "string" }, "description": "List of student userCodes in the class" },
+        "coTeacherIds": { "type": "array", "items": { "type": "string" }, "description": "List of co-teacher UIDs in the class" },
+        "studentIds": { "type": "array", "items": { "type": "string" }, "description": "List of student UIDs in the class" },
+        "pendingStudentIds": { "type": "array", "items": { "type": "string" }, "description": "List of student UIDs invited to the class" },
         "createdAt": { "type": "string", "format": "date-time" }
       },
       "required": ["name", "teacherId"]
@@ -46,12 +58,29 @@
         "count": { "type": "number", "description": "Current count value" }
       },
       "required": ["count"]
+    },
+    "feedbacks": {
+      "title": "Feedback",
+      "description": "Communication between user and teacher/AI",
+      "type": "object",
+      "properties": {
+        "senderId": { "type": "string" },
+        "senderName": { "type": "string" },
+        "text": { "type": "string" },
+        "timestamp": { "type": "string", "format": "date-time" },
+        "isTeacher": { "type": "boolean" }
+      },
+      "required": ["senderId", "senderName", "text"]
     }
   },
   "firestore": {
     "/users/{uid}": {
       "schema": "users",
       "description": "User profile document"
+    },
+    "/users/{uid}/feedbacks/{feedbackId}": {
+      "schema": "feedbacks",
+      "description": "Feedback messages for a user"
     },
     "/classes/{classId}": {
       "schema": "classes",
