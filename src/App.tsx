@@ -692,22 +692,40 @@ const ClassManagement = ({ onClose, teacherId, initialClassId }: { onClose: () =
           setCoTeachersInClass([]);
         }
 
-        // Fetch pending co-teachers
+        // Fetch pending students and co-teachers together to prevent race condition
+        const pendingList: any[] = [];
+        
         if (selectedClass.pendingTeacherIds && selectedClass.pendingTeacherIds.length > 0) {
           const uniquePendingCoUids = Array.from(new Set(selectedClass.pendingTeacherIds as string[]));
-          const pendingCoList: any[] = [];
           for (const uid of uniquePendingCoUids) {
             try {
               const userDoc = await getDoc(doc(db, 'users', uid));
               if (userDoc.exists()) {
-                pendingCoList.push({ id: userDoc.id, ...userDoc.data(), isCoTeacher: true });
+                pendingList.push({ id: userDoc.id, ...userDoc.data(), isCoTeacher: true });
               }
             } catch (error) {
               handleFirestoreError(error, OperationType.GET, `users/${uid}`);
             }
           }
-          setPendingStudentsInClass(prev => [...prev, ...pendingCoList]);
         }
+        
+        if (selectedClass.pendingStudentIds && selectedClass.pendingStudentIds.length > 0) {
+          const uniquePendingUids = Array.from(new Set(selectedClass.pendingStudentIds as string[]));
+          for (const uid of uniquePendingUids) {
+            try {
+              const userDoc = await getDoc(doc(db, 'users', uid));
+              if (userDoc.exists()) {
+                // Ensure we don't add duplicates if they were somehow in both lists
+                if (!pendingList.some(user => user.id === uid)) {
+                  pendingList.push({ id: userDoc.id, ...userDoc.data() });
+                }
+              }
+            } catch (error) {
+              handleFirestoreError(error, OperationType.GET, `users/${uid}`);
+            }
+          }
+        }
+        setPendingStudentsInClass(pendingList);
         
         // Fetch joined students
         if (selectedClass.studentIds && selectedClass.studentIds.length > 0) {
@@ -726,25 +744,6 @@ const ClassManagement = ({ onClose, teacherId, initialClassId }: { onClose: () =
           setStudentsInClass(studentsList);
         } else {
           setStudentsInClass([]);
-        }
-
-        // Fetch pending students
-        if (selectedClass.pendingStudentIds && selectedClass.pendingStudentIds.length > 0) {
-          const uniquePendingUids = Array.from(new Set(selectedClass.pendingStudentIds as string[]));
-          const pendingList: any[] = [];
-          for (const uid of uniquePendingUids) {
-            try {
-              const userDoc = await getDoc(doc(db, 'users', uid));
-              if (userDoc.exists()) {
-                pendingList.push({ id: userDoc.id, ...userDoc.data() });
-              }
-            } catch (error) {
-              handleFirestoreError(error, OperationType.GET, `users/${uid}`);
-            }
-          }
-          setPendingStudentsInClass(pendingList);
-        } else {
-          setPendingStudentsInClass([]);
         }
       } else {
         setStudentsInClass([]);
@@ -1533,7 +1532,7 @@ const LoginModal = ({ isOpen, onClose, onLogin }: { isOpen: boolean, onClose: ()
     }
     try {
       await sendPasswordResetEmail(auth, trimmedEmail);
-      alert(`Link đặt lại mật khẩu đã được gửi đến ${trimmedEmail}. Vui lòng kiểm tra hộp thư.`);
+      alert(`Link đặt lại mật khẩu đã được gửi đến ${trimmedEmail}. Vui lòng kiểm tra hộp thư (bao gồm cả thư rác/spam).`);
       setAuthError(null);
     } catch (error: any) {
       console.error("Reset Password Error:", error);
@@ -3037,7 +3036,7 @@ export default function App() {
             )}
             {!showAbout && !showDictionary && !showRanking && !showCertificates && !showStats && <ProgressBar currentStep={step} />}
 
-      // Class Invitations Section
+            {/* Class Invitations Section */}
             {isLoggedIn && (((userRole === 'student' && pendingInvites.length > 0) || (userRole === 'teacher' && teacherInvites.length > 0))) && step === 0 && !showAbout && !showDictionary && !showRanking && (
               <motion.div 
                 initial={{ opacity: 0, y: -20 }}
