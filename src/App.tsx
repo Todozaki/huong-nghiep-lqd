@@ -1570,6 +1570,11 @@ const LoginModal = ({ isOpen, onClose, onLogin }: { isOpen: boolean, onClose: ()
       return;
     }
 
+    if (emailMode === 'register' && !trimmedEmail.toLowerCase().endsWith("@gmail.com")) {
+      setAuthError("Không tìm thấy Gmail, vui lòng kiểm tra lại.");
+      return;
+    }
+
     setIsLoading(true);
     setAuthError(null);
 
@@ -1591,6 +1596,10 @@ const LoginModal = ({ isOpen, onClose, onLogin }: { isOpen: boolean, onClose: ()
 
         const result = await response.json();
         if (!response.ok) {
+          // Check for common email errors
+          if (result.error && (result.error.includes("recipient") || result.error.includes("invalid") || result.error.includes("not found"))) {
+            throw new Error("Không tìm thấy Gmail, vui lòng kiểm tra lại.");
+          }
           throw new Error(result.error || "Lỗi gửi mã OTP");
         }
 
